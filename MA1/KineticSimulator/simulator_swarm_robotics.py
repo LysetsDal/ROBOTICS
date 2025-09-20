@@ -310,69 +310,90 @@ class Robot:
         ## --- Flocking (Boids) --- ##
 
         if swarm_mode == 2:
-            separation_vec = np.array([0.0, 0.0])
-            alignment_vec = np.array([0.0, 0.0])
-            cohesion_vec = np.array([0.0, 0.0])
-            neighbor_count = 0
-            flock_speed = MAX_SPEED * 0.6  # default speed
+            # --- parameters ---
+            VISIBLE_RANGE = RAB_RANGE      # use RAB for neighbor detection
+            PROTECTED = PROX_SENSOR_RANGE * 0.6  # very close -> strong separation
+            OBSTACLE_ALERT = PROX_SENSOR_RANGE * 0.7
 
-            VISIBLE_RANGE = PROX_SENSOR_RANGE * 1.0
-            PROTECTED_HIGH = PROX_SENSOR_RANGE * 0.8
-            PROTECTED_LOW = PROX_SENSOR_RANGE * 0.6
+            # weights (tune these)
+            w_align = 1.0
+            w_cohesion = 0.6
+            w_separation = 2.2
+            w_repel = 4.0
+
+            # accumulators
+            alignment = np.array([0.0, 0.0])
+            cohesion = np.array([0.0, 0.0])
+            separation = np.array([0.0, 0.0])
+            neighbor_count = 0
 
             repel_vec = np.array([0.0, 0.0])
             too_close = False
 
-            # Wall / obstacle avoidance
+            # 1) obstacle / wall avoidance from proximity sensors
             for i, reading in enumerate(self.prox_readings):
-                if reading["type"] in ["wall", "robot", "obstacle"] and reading["distance"] < PROX_SENSOR_RANGE * 0.6:
+                if reading["type"] in ("wall", "obstacle", "robot") and reading["distance"] < OBSTACLE_ALERT:
                     too_close = True
-                    angle = self._heading + self.prox_angles[i]
-                    repel_vec -= np.array([np.cos(angle), np.sin(angle)])
-                    flock_speed = MAX_SPEED * 0.5  # slow down when near obstacles
+                    ang = self._heading + self.prox_angles[i]
+                    repel_vec -= np.array([np.cos(ang), np.sin(ang)]) * (1.0 - reading["distance"] / PROX_SENSOR_RANGE)
 
-            # Flocking with neighbors
+            # 2) neighbours via RAB signals
             for sig in self.rab_signals:
-                distance = sig['distance']
-                angle = sig['bearing'] + self._heading
-                neighbor_pos = self._pos + np.array([np.cos(angle), np.sin(angle)]) * distance
+                d = sig['distance']
+                if d > VISIBLE_RANGE:
+                    continue
+                # global angle to neighbor
+                ang = (sig['bearing'] + self._heading) % (2*np.pi)
+                neighbor_pos = self._pos + np.array([np.cos(ang), np.sin(ang)]) * d
+
+                # alignment: use neighbor heading (message stores global heading)
+                nh = sig['message'].get('heading', 0.0)
+                alignment += np.array([np.cos(nh), np.sin(nh)])
+                cohesion += neighbor_pos
+                neighbor_count += 1
+
+                # separation stronger when very close
                 offset = self._pos - neighbor_pos
+                if d < PROTECTED:
+                    # weight by proximity (closer => stronger)
+                    separation += (offset / (d + 1e-6)) * ((PROTECTED - d) / PROTECTED)
 
-                if distance <= VISIBLE_RANGE:
-                    alignment_vec += np.array([np.cos(sig['message']['heading']), np.sin(sig['message']['heading'])])
-                    cohesion_vec += neighbor_pos
-                    neighbor_count += 1
-
-                    if distance < PROTECTED_LOW:
-                        separation_vec += offset / (distance**2 + 1e-5)
-                        flock_speed = MAX_SPEED * 0.5
-                    elif distance < PROTECTED_HIGH:
-                        flock_speed = MAX_SPEED * 0.55
-
+            # normalize / finalize boid components
             if neighbor_count > 0:
-                alignment_vec /= neighbor_count
-                cohesion_center = cohesion_vec / neighbor_count
-                cohesion_vec = (cohesion_center - self._pos) * 0.3  # scale down cohesion
+                alignment = alignment / neighbor_count
+                center = cohesion / neighbor_count
+                cohesion = (center - self._pos)  # vector toward flock center
 
-            # Combine vectors
-            w_alignment = 2.0
-            w_cohesion = 0.5
-            w_separation = 1.0
-            w_repel = 2.0
+            # Normalize component lengths (prevents domination by any one)
+            def normed(v):
+                n = np.linalg.norm(v)
+                return v / n if n > 1e-8 else v
 
-            flock_vec = (
-                w_alignment * alignment_vec +
-                w_cohesion * cohesion_vec +
-                w_separation * separation_vec +
-                w_repel * repel_vec
-            )
+            alignment = normed(alignment) * w_align
+            cohesion = normed(cohesion) * w_cohesion
+            separation = normed(separation) * w_separation
+            repel = normed(repel_vec) * w_repel
 
-            if np.linalg.norm(flock_vec) > 1e-5:
+            # If immediate danger, give repulsion priority and slow down
+            if (too_close and np.linalg.norm(repel_vec) > 1e-6) or (np.linalg.norm(separation) > 0.0 and np.linalg.norm(separation) > 0.1):
+                # high priority avoidance
+                flock_vec = repel + separation * 1.5
+                target_speed = MAX_SPEED * 0.25
+            else:
+                # combine peacefully
+                flock_vec = alignment + cohesion + separation + repel
+                # increase forward speed with stronger alignment & cohesion (so group moves)
+                speed_factor = 0.5 + 0.5 * min(1.0, neighbor_count / 6.0)
+                target_speed = MAX_SPEED * (0.2 + 0.5 * speed_factor)
+
+            # if there's something to do, compute heading & set velocities
+            if np.linalg.norm(flock_vec) > 1e-6:
                 target_angle = np.arctan2(flock_vec[1], flock_vec[0])
                 delta_bearing = self.compute_angle_diff(target_angle)
-                self.set_rotation_and_speed(delta_bearing, flock_speed)
+                # use a bit more aggressive rotational gain so robots align quickly but still clipped by MAX_TURN
+                self.set_rotation_and_speed(delta_bearing, target_speed, kp=1.2)
             else:
-                self.set_rotation_and_speed(0, flock_speed)
+                self.set_rotation_and_speed(0, target_speed, kp=0.8)
 
         
         ## --- STOP ROBOTS --- ##
@@ -585,4 +606,5 @@ def main():
     logging_close()
 
 if __name__ == "__main__":
+    main()
     main()
