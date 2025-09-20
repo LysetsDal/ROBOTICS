@@ -25,7 +25,7 @@ ARENA_BOUNDS = {
 }
 
 # Parameters
-NUM_ROBOTS = 3
+NUM_ROBOTS = 8
 ROBOT_RADIUS = 10
 
 NUM_PROX_SENSORS = 6
@@ -277,8 +277,10 @@ class Robot:
 
     #     # --- Dispersion behavior ---
     def robot_controller(self, swarm_mode):
+        
+        ## --- DISPERSION --- ##
         if (swarm_mode == 1):
-          ## --- DISPERSION --- ##
+
           repel_vec = np.array([0.0, 0.0])
           too_close = False
           # Loop though proximity sensors
@@ -304,94 +306,119 @@ class Robot:
                   self.broadcast_signal = False
           else:
               self.set_rotation_and_speed(0, MAX_SPEED * 0.5)
+
+        ## --- Flocking (Boids) --- ##
+
+        if swarm_mode == 2:
+            separation_vec = np.array([0.0, 0.0])
+            alignment_vec = np.array([0.0, 0.0])
+            cohesion_vec = np.array([0.0, 0.0])
+            neighbor_count = 0
+            flock_speed = MAX_SPEED * 0.6  # default speed
+
+            VISIBLE_RANGE = PROX_SENSOR_RANGE * 1.0
+            PROTECTED_HIGH = PROX_SENSOR_RANGE * 0.8
+            PROTECTED_LOW = PROX_SENSOR_RANGE * 0.6
+
+            repel_vec = np.array([0.0, 0.0])
+            too_close = False
+
+            # Wall / obstacle avoidance
+            for i, reading in enumerate(self.prox_readings):
+                if reading["type"] in ["wall", "robot", "obstacle"] and reading["distance"] < PROX_SENSOR_RANGE * 0.6:
+                    too_close = True
+                    angle = self._heading + self.prox_angles[i]
+                    repel_vec -= np.array([np.cos(angle), np.sin(angle)])
+                    flock_speed = MAX_SPEED * 0.5  # slow down when near obstacles
+
+            # Flocking with neighbors
+            for sig in self.rab_signals:
+                distance = sig['distance']
+                angle = sig['bearing'] + self._heading
+                neighbor_pos = self._pos + np.array([np.cos(angle), np.sin(angle)]) * distance
+                offset = self._pos - neighbor_pos
+
+                if distance <= VISIBLE_RANGE:
+                    alignment_vec += np.array([np.cos(sig['message']['heading']), np.sin(sig['message']['heading'])])
+                    cohesion_vec += neighbor_pos
+                    neighbor_count += 1
+
+                    if distance < PROTECTED_LOW:
+                        separation_vec += offset / (distance**2 + 1e-5)
+                        flock_speed = MAX_SPEED * 0.5
+                    elif distance < PROTECTED_HIGH:
+                        flock_speed = MAX_SPEED * 0.55
+
+            if neighbor_count > 0:
+                alignment_vec /= neighbor_count
+                cohesion_center = cohesion_vec / neighbor_count
+                cohesion_vec = (cohesion_center - self._pos) * 0.3  # scale down cohesion
+
+            # Combine vectors
+            w_alignment = 2.0
+            w_cohesion = 0.5
+            w_separation = 1.0
+            w_repel = 2.0
+
+            flock_vec = (
+                w_alignment * alignment_vec +
+                w_cohesion * cohesion_vec +
+                w_separation * separation_vec +
+                w_repel * repel_vec
+            )
+
+            if np.linalg.norm(flock_vec) > 1e-5:
+                target_angle = np.arctan2(flock_vec[1], flock_vec[0])
+                delta_bearing = self.compute_angle_diff(target_angle)
+                self.set_rotation_and_speed(delta_bearing, flock_speed)
+            else:
+                self.set_rotation_and_speed(0, flock_speed)
+
         
-        if (swarm_mode == 2):
-          ## --- Flocking (Boids) --- ##
-          separation_vec = np.array([0.0, 0.0])
-          alignment_vec = np.array([0.0, 0.0])
-          cohesion_vec = np.array([0.0, 0.0])
-          neighbor_count = 0
-
-          for sig in self.rab_signals:
-            # sig['distance'], sig['bearing'], sig['message']['heading']
-            # convert RAB signal to relative position vector
-
-            angle = sig['bearing'] + self._heading
-            neighbor_pos = self._pos + np.array([np.cos(angle), np.sin(angle)]) * sig['distance']
-            offset = self._pos - neighbor_pos
-
-            # Separation (repel if too close)
-            if sig['distance'] < PROX_SENSOR_RANGE * 0.4:
-                separation_vec += offset / (sig['distance']**2 + 1e-5)
-
-            # Alignment (match heading)
-            neighbor_heading = sig['message']['heading']
-            alignment_vec += np.array([np.cos(neighbor_heading), np.sin(neighbor_heading)])
-
-            # Cohesion (move toward center)
-            cohesion_vec += neighbor_pos
-            neighbor_count += 1
-
-          if neighbor_count > 0:
-              # Average for alignment and cohesion
-              alignment_vec /= neighbor_count
-              cohesion_center = cohesion_vec / neighbor_count
-              cohesion_vec = cohesion_center - self._pos
-
-          # Combine behaviors with weights
-          flock_vec = (1.5 * separation_vec + 1.0 * alignment_vec + 1.0 * cohesion_vec)
-          if np.linalg.norm(flock_vec) > 1e-5:
-              target_angle = np.arctan2(flock_vec[1], flock_vec[0])
-              delta_bearing = self.compute_angle_diff(target_angle)
-              self.set_rotation_and_speed(delta_bearing, MAX_SPEED * 0.6)
-          else:
-              self.set_rotation_and_speed(0, MAX_SPEED * 0.5)
-        
+        ## --- STOP ROBOTS --- ##
         if (swarm_mode == 3):
-            ## STOP
             self.set_rotation_and_speed(0, MAX_SPEED * 0.0)
             self.broadcast_signal = False
         
 
 
 
+    def draw(self, screen, active):
+        if active:
+          # --- IR proximity sensors ---
+          for i, reading in enumerate(self.prox_readings):
+              dist = reading["distance"]
+              obj_type = reading["type"]
 
+              angle = self._heading + self.prox_angles[i]
+              sensor_dir = np.array([np.cos(angle), np.sin(angle)])
+              end_pos = self._pos + sensor_dir * dist
 
-    def draw(self, screen):
-        # --- IR proximity sensors ---
-        for i, reading in enumerate(self.prox_readings):
-            dist = reading["distance"]
-            obj_type = reading["type"]
+              # Color code by detected object type
+              if obj_type == "robot":
+                  color = (0, 150, 255)  # Blue
+              elif obj_type == "obstacle":
+                  color = (255, 165, 0)  # Orange
+              elif obj_type == "wall":
+                  color = (255, 255, 100)  # Yellow
+              else:
+                  color = (20, 80, 20)  # Green (no hit)
 
-            angle = self._heading + self.prox_angles[i]
-            sensor_dir = np.array([np.cos(angle), np.sin(angle)])
-            end_pos = self._pos + sensor_dir * dist
+              pygame.draw.line(screen, color, self._pos, end_pos, 2)
+              pygame.draw.circle(screen, color, end_pos.astype(int), 3)
 
-            # Color code by detected object type
-            if obj_type == "robot":
-                color = (0, 150, 255)  # Blue
-            elif obj_type == "obstacle":
-                color = (255, 165, 0)  # Orange
-            elif obj_type == "wall":
-                color = (255, 255, 100)  # Yellow
-            else:
-                color = (20, 80, 20)  # Green (no hit)
+          # --- RAB signals ---
+          for sig in self.rab_signals:
+              sig_angle = self._heading + self.rab_angles[sig['sensor_idx']]
+              sensor_dir = np.array([np.cos(sig_angle), np.sin(sig_angle)])
 
-            pygame.draw.line(screen, color, self._pos, end_pos, 2)
-            pygame.draw.circle(screen, color, end_pos.astype(int), 3)
+              start = self._pos + sensor_dir * (self._radius + 3)
+              end = self._pos + sensor_dir * (self._radius + 3 + sig['distance'])
 
-        # --- RAB signals ---
-        for sig in self.rab_signals:
-            sig_angle = self._heading + self.rab_angles[sig['sensor_idx']]
-            sensor_dir = np.array([np.cos(sig_angle), np.sin(sig_angle)])
+              intensity_color = 55+int(200 * (sig['intensity']*2-1))
+              color = (intensity_color, 50, intensity_color)
 
-            start = self._pos + sensor_dir * (self._radius + 3)
-            end = self._pos + sensor_dir * (self._radius + 3 + sig['distance'])
-
-            intensity_color = 55+int(200 * (sig['intensity']*2-1))
-            color = (intensity_color, 50, intensity_color)
-
-            pygame.draw.line(screen, color, start, end, 2)
+              pygame.draw.line(screen, color, start, end, 2)
 
         # --- Robot body ---
         pygame.draw.circle(screen, ROBOT_COLOR, self._pos.astype(int), self._radius)
@@ -494,6 +521,7 @@ def main():
     visualize = True
     last_metric_time = 0.0 # used for nearest neighbour clock
     swarm_mode = 1
+    show_visual_lines = True
 
     while running:
         for event in pygame.event.get():
@@ -512,6 +540,8 @@ def main():
                     swarm_mode = 2
                 elif event.key == pygame.K_3:
                     swarm_mode = 3
+                elif event.key == pygame.K_v:
+                    show_visual_lines = not show_visual_lines
 
 
         if not paused:
@@ -541,7 +571,7 @@ def main():
             draw_light_sources(screen)
             draw_obstacles(screen)
             for robot in robots:
-                robot.draw(screen)
+                robot.draw(screen, show_visual_lines)
             if paused:
                 txt = font.render("PAUSED", True, (255, 100, 100))
                 screen.blit(txt, (10, 10))
