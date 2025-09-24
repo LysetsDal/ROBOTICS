@@ -22,16 +22,16 @@ font = pygame.font.SysFont(None, 20)
 ARENA_BOUNDS = {"left": 0, "right": WIDTH, "top": 0, "bottom": HEIGHT}
 
 # Parameters
-NUM_ROBOTS = 8
+NUM_ROBOTS = 16
 ROBOT_RADIUS = 10
 
 NUM_PROX_SENSORS = 6
 NUM_RAB_SENSORS = 12
 
-PROX_SENSOR_RANGE = 120  # pixels
+PROX_SENSOR_RANGE = 100  # pixels
 RAB_RANGE = 150  # pixels
 
-MAX_SPEED = 200
+MAX_SPEED = 150
 MAX_TURN = 16  # radians/sec - a real robot like the e-puck or TurtleBot typically turns at 90–180 deg/sec (≈ 1.5–3.1 rad/sec)
 
 # sensor noise and dropout
@@ -543,6 +543,18 @@ def compute_avg_nearest_neighbor(robots):
     return np.mean(dists) if dists else 0.0
 
 
+def init_robots(seed=42):
+    np.random.seed(seed)
+    robots = []
+    for i in range(NUM_ROBOTS):
+        pos = np.random.uniform(
+            [ROBOT_RADIUS, ROBOT_RADIUS], [WIDTH - ROBOT_RADIUS, HEIGHT - ROBOT_RADIUS]
+        )
+        heading = np.random.uniform(0, 2 * np.pi)
+        robots.append(Robot(i, pos, heading))
+    return robots
+
+
 def snapshot_metrics(robots, total_time, last_metric_time, interval=5.0):
     """Pause robots, compute metrics (avg NN distance + convex hull area), print, and resume.
 
@@ -650,12 +662,7 @@ def main():
     robots = []
 
     np.random.seed(42)
-    for i in range(NUM_ROBOTS):
-        pos = np.random.uniform(
-            [ROBOT_RADIUS, ROBOT_RADIUS], [WIDTH - ROBOT_RADIUS, HEIGHT - ROBOT_RADIUS]
-        )
-        heading = np.random.uniform(0, 2 * np.pi)
-        robots.append(Robot(i, pos, heading))
+    robots = init_robots(seed=42)
 
     logging_init()
 
@@ -692,6 +699,18 @@ def main():
                     swarm_mode = 3
                 elif event.key == pygame.K_v:
                     show_visual_lines = not show_visual_lines
+                elif event.key == pygame.K_r:
+                    print("Restarting simulation (same seed)")
+                    robots = init_robots(seed=42)
+                    frame_count = 0
+                    total_time = 0
+                    last_metric_time = 0
+                elif event.key == pygame.K_t:
+                    print("Restarting simulation (random seed)")
+                    robots = init_robots(seed=None)
+                    frame_count = 0
+                    total_time = 0
+                    last_metric_time = 0
 
         if not paused:
             total_time += dt  # accumulate time
