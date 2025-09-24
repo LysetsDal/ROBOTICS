@@ -593,8 +593,7 @@ def snapshot_flocking_metrics(
 
         print(
             f"[{total_time:5.1f}s] alignment={alignment:.2f}, "
-            f"cohesion={avg_nn:.2f}, hull={hull_area:.2f}, "
-            f"collisions={collisions}"
+            f"cohesion={avg_nn:.2f}, hull={hull_area:.2f} "
         )
         return total_time
     return last_metric_time
@@ -754,7 +753,6 @@ def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
         print(
             f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
         )
-        print(f"Collisions: avg={coll_mean:.1f}, min={coll_min}, max={coll_max}")
         print("=======================================")
         return (
             align_mean,
@@ -910,7 +908,6 @@ def print_flocking_summary(align_stats, coh_stats, hull_stats, coll_stats):
     print(
         f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
     )
-    print(f"Collisions: avg={coll_mean:.1f}, min={coll_min}, max={coll_max}")
     print("=======================================")
 
 
