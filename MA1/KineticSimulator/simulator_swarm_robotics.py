@@ -2,6 +2,7 @@ import pygame
 import numpy as np
 import sys
 from scipy.spatial import ConvexHull
+from sklearn.cluster import DBSCAN
 
 # Pygame setup
 WIDTH, HEIGHT = 800, 800
@@ -556,6 +557,37 @@ def compute_avg_nearest_neighbor(robots):
     return np.mean(dists) if dists else 0.0
 
 
+def compute_num_flocks(robots, eps=None, min_samples=1):
+    """
+    Count the number of flocks using DBSCAN clustering.
+
+    Args:
+        robots: List of robot objects
+        eps: Maximum distance between two samples for one to be considered as in the neighborhood of the other
+        min_samples: Minimum number of samples in a neighborhood for a point to be considered as a core point
+
+    Returns:
+        int: Number of flocks (clusters)
+    """
+    if len(robots) < min_samples:
+        return 0
+    
+    if eps is None:
+        eps = RAB_RANGE * 0.8
+        # eps = PROX_SENSOR_RANGE * 0.8
+
+    # Extract robot positions
+    positions = np.array([robot._pos for robot in robots])
+
+    # Apply DBSCAN clustering
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(positions)
+
+    # Count number of clusters (excluding noise points labeled as -1)
+    num_flocks = len(set(clustering.labels_)) - (1 if -1 in clustering.labels_ else 0)
+
+    return num_flocks
+
+
 def init_robots(seed=42):
     np.random.seed(seed)
     robots = []
@@ -581,19 +613,20 @@ def snapshot_dispersion_metrics(robots, total_time, last_metric_time, interval=5
 def snapshot_flocking_metrics(
     robots, total_time, last_metric_time, interval=5.0, collisions=0
 ):
-    """Print flocking metrics at intervals (alignment + cohesion + collisions)."""
+    """Print flocking metrics at intervals (alignment + cohesion + collisions + flock count)."""
     if total_time - last_metric_time >= interval:
         headings = np.array([r._heading for r in robots])
         heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
         mean_vec = np.mean(heading_vecs, axis=0)
         alignment = np.linalg.norm(mean_vec)
         hull_area = compute_convex_hull_area(robots)
-
         avg_nn = compute_avg_nearest_neighbor(robots)
+        num_flocks = compute_num_flocks(robots)
 
         print(
             f"[{total_time:5.1f}s] alignment={alignment:.2f}, "
-            f"cohesion={avg_nn:.2f}, hull={hull_area:.2f} "
+            f"cohesion={avg_nn:.2f}, hull={hull_area:.2f}, "
+            f"flocks={num_flocks}"
         )
         return total_time
     return last_metric_time
@@ -674,7 +707,8 @@ def run_headless_once(runtime=120.0, swarm_mode=1, seed=None, interval=5.0):
         alignment = np.linalg.norm(mean_vec)
         avg_nn = compute_avg_nearest_neighbor(robots)
         hull_area = compute_convex_hull_area(robots)
-        return alignment, avg_nn, collisions, hull_area
+        num_flocks = compute_num_flocks(robots)
+        return alignment, avg_nn, collisions, hull_area, num_flocks
 
 
 def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
@@ -712,15 +746,16 @@ def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
         return nn_mean, nn_min, nn_max, hull_mean, hull_min, hull_max
 
     if swarm_mode == 2:
-        alignments, cohesions, collisions, hull_values = [], [], [], []
+        alignments, cohesions, collisions, hull_values, flock_counts = [], [], [], [], []
         for i in range(num_runs):
-            alignment, avg_nn, coll, hull_area = run_headless_once(
+            alignment, avg_nn, coll, hull_area, num_flocks = run_headless_once(
                 runtime, swarm_mode, seed=i, interval=interval
             )
             alignments.append(alignment)
             cohesions.append(avg_nn)
             collisions.append(coll)
             hull_values.append(hull_area)
+            flock_counts.append(num_flocks)
 
         align_mean, align_min, align_max = (
             np.mean(alignments),
@@ -742,6 +777,11 @@ def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
             np.min(collisions),
             np.max(collisions),
         )
+        flock_mean, flock_min, flock_max = (
+            np.mean(flock_counts),
+            np.min(flock_counts),
+            np.max(flock_counts),
+        )
 
         print("\n=== FLOCKING TEST SUMMARY over", num_runs, "runs ===")
         print(
@@ -752,6 +792,9 @@ def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
         )
         print(
             f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
+        )
+        print(
+            f"Number of Flocks: avg={flock_mean:.2f}, min={flock_min:.2f}, max={flock_max:.2f}"
         )
         print("=======================================")
         return (
@@ -767,6 +810,9 @@ def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
             coll_mean,
             coll_min,
             coll_max,
+            flock_mean,
+            flock_min,
+            flock_max,
         )
 
 
@@ -892,11 +938,12 @@ def print_dispersion_summary(nn_stats, hull_stats):
     print("=======================================")
 
 
-def print_flocking_summary(align_stats, coh_stats, hull_stats, coll_stats):
+def print_flocking_summary(align_stats, coh_stats, hull_stats, coll_stats, flock_stats):
     align_mean, align_min, align_max = align_stats
     coh_mean, coh_min, coh_max = coh_stats
     hull_mean, hull_min, hull_max = hull_stats
     coll_mean, coll_min, coll_max = coll_stats
+    flock_mean, flock_min, flock_max = flock_stats
 
     print("Flocking Test Summary:")
     print(
@@ -907,6 +954,9 @@ def print_flocking_summary(align_stats, coh_stats, hull_stats, coll_stats):
     )
     print(
         f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
+    )
+    print(
+        f"Number of Flocks: avg={flock_mean:.2f}, min={flock_min:.2f}, max={flock_max:.2f}"
     )
     print("=======================================")
 
@@ -934,6 +984,9 @@ if __name__ == "__main__":
             coll_mean,
             coll_min,
             coll_max,
+            flock_mean,
+            flock_min,
+            flock_max,
         ) = test(num_runs=1, swarm_mode=2, interval=1.0)
 
         print("\n=======================================")
@@ -949,6 +1002,7 @@ if __name__ == "__main__":
             (coh_mean, coh_min, coh_max),
             (hull_mean, hull_min, hull_max),
             (coll_mean, coll_min, coll_max),
+            (flock_mean, flock_min, flock_max),
         )
     else:
         main()  # run interactive
