@@ -1,5 +1,6 @@
 import pygame
 import numpy as np
+import sys
 from scipy.spatial import ConvexHull
 
 # Pygame setup
@@ -528,6 +529,18 @@ def compute_metrics():  # pass as many arguments as you need and compute relevan
     return []
 
 
+def compute_convex_hull_area(robots):
+    """Compute convex hull area of all robot positions."""
+    points = np.array([r._pos for r in robots])
+
+    # trivial cases (1 or 2 robots)
+    if len(points) < 3:
+        return 0.0
+
+    hull = ConvexHull(points)
+    return hull.volume  # for 2D hulls, "volume" is the polygon area
+
+
 def compute_avg_nearest_neighbor(robots):
     dists = []
     for i, r in enumerate(robots):
@@ -555,45 +568,41 @@ def init_robots(seed=42):
     return robots
 
 
-def snapshot_metrics(robots, total_time, last_metric_time, interval=5.0):
-    """Pause robots, compute metrics (avg NN distance + convex hull area), print, and resume.
-
-    Returns updated last_metric_time.
-    """
-    if total_time - last_metric_time < interval:
-        return last_metric_time  # no update yet
-
-    # Save velocities and pause
-    saved_vels = [(r._linear_velocity, r._angular_velocity) for r in robots]
-    for r in robots:
-        r._set_velocity(0, 0)
-
-    # --- Metrics ---
-    # Average nearest neighbor distance
-    avg_nn = compute_avg_nearest_neighbor(robots)
-
-    # Convex hull area (requires at least 3 points)
-    positions = np.array([r._pos for r in robots])
-    hull_area = 0.0
-    if len(positions) >= 3:
-        hull_area = float(
-            ConvexHull(positions).volume
-        )  # use .volume for 3D, .area for 2D hull perimeter/area
-
-    # Print metrics
-    print(
-        f"[t={total_time:.1f}s] Avg NN distance: {avg_nn:.2f}, Hull area: {hull_area:.2f}"
-    )
-
-    # Restore velocities
-    for r, (lin, ang) in zip(robots, saved_vels):
-        r._set_velocity(lin, ang)
-
-    return total_time
+def snapshot_dispersion_metrics(robots, total_time, last_metric_time, interval=5.0):
+    """Print dispersion metrics at intervals (nearest neighbor + hull)."""
+    if total_time - last_metric_time >= interval:
+        avg_nn = compute_avg_nearest_neighbor(robots)
+        hull_area = compute_convex_hull_area(robots)
+        print(f"[{total_time:5.1f}s] avg_nn={avg_nn:.2f}, hull_area={hull_area:.2f}")
+        return total_time
+    return last_metric_time
 
 
-def run_headless_once(runtime=120.0, swarm_mode=2, seed=None):
+def snapshot_flocking_metrics(
+    robots, total_time, last_metric_time, interval=5.0, collisions=0
+):
+    """Print flocking metrics at intervals (alignment + cohesion + collisions)."""
+    if total_time - last_metric_time >= interval:
+        headings = np.array([r._heading for r in robots])
+        heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
+        mean_vec = np.mean(heading_vecs, axis=0)
+        alignment = np.linalg.norm(mean_vec)
+        hull_area = compute_convex_hull_area(robots)
+
+        avg_nn = compute_avg_nearest_neighbor(robots)
+
+        print(
+            f"[{total_time:5.1f}s] alignment={alignment:.2f}, "
+            f"cohesion={avg_nn:.2f}, hull={hull_area:.2f}, "
+            f"collisions={collisions}"
+        )
+        return total_time
+    return last_metric_time
+
+
+def run_headless_once(runtime=120.0, swarm_mode=1, seed=None, interval=5.0):
     """Run one simulation in headless mode and return final metrics."""
+
     dt = SIM_DT
     robots = []
 
@@ -610,50 +619,157 @@ def run_headless_once(runtime=120.0, swarm_mode=2, seed=None):
 
     total_time = 0.0
     last_metric_time = 0.0
+    collisions = 0
 
     while total_time < runtime:
         total_time += dt
-        for robot in robots:
-            robot.read_sensors(robots, OBSTACLES, ARENA_BOUNDS)
-        for robot in robots:
-            robot.robot_controller(swarm_mode)
-        for robot in robots:
-            robot.move(dt)
-        # optional: metrics every 5 sec
-        last_metric_time = snapshot_metrics(
-            robots, total_time, last_metric_time, interval=5.0
+
+        for r in robots:
+            r.read_sensors(robots, OBSTACLES, ARENA_BOUNDS)
+        for r in robots:
+            r.robot_controller(swarm_mode)
+        for r in robots:
+            r.move(dt)
+
+        # --- collisions ---
+        if swarm_mode == 2:
+            for i, r1 in enumerate(robots):
+                for j, r2 in enumerate(robots):
+                    if i >= j:
+                        continue
+                    if np.linalg.norm(r1._pos - r2._pos) < 2 * ROBOT_RADIUS:
+                        collisions += 1
+            for r in robots:
+                if (
+                    r._pos[0] <= ROBOT_RADIUS
+                    or r._pos[0] >= WIDTH - ROBOT_RADIUS
+                    or r._pos[1] <= ROBOT_RADIUS
+                    or r._pos[1] >= HEIGHT - ROBOT_RADIUS
+                ):
+                    collisions += 1
+
+        # --- metrics snapshot ---
+        if swarm_mode == 1:
+            last_metric_time = snapshot_dispersion_metrics(
+                robots, total_time, last_metric_time, interval=interval
+            )
+        elif swarm_mode == 2:
+            last_metric_time = snapshot_flocking_metrics(
+                robots,
+                total_time,
+                last_metric_time,
+                interval=interval,
+                collisions=collisions,
+            )
+
+    # ===== FINAL METRICS =====
+    if swarm_mode == 1:
+        avg_nn = compute_avg_nearest_neighbor(robots)
+        hull_area = compute_convex_hull_area(robots)
+        return avg_nn, hull_area
+
+    elif swarm_mode == 2:
+        headings = np.array([r._heading for r in robots])
+        heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
+        mean_vec = np.mean(heading_vecs, axis=0)
+        alignment = np.linalg.norm(mean_vec)
+        avg_nn = compute_avg_nearest_neighbor(robots)
+        hull_area = compute_convex_hull_area(robots)
+        return alignment, avg_nn, collisions, hull_area
+
+
+def test(num_runs=5, runtime=120.0, swarm_mode=1, interval=5.0):
+    """Run multiple headless experiments and print summary statistics."""
+
+    if swarm_mode == 1:
+        nn_values, hull_values = [], []
+        for i in range(num_runs):
+            avg_nn, hull_area = run_headless_once(
+                runtime, swarm_mode, seed=i, interval=interval
+            )
+            nn_values.append(avg_nn)
+            hull_values.append(hull_area)
+
+        nn_mean, nn_min, nn_max = (
+            np.mean(nn_values),
+            np.min(nn_values),
+            np.max(nn_values),
+        )
+        hull_mean, hull_min, hull_max = (
+            np.mean(hull_values),
+            np.min(hull_values),
+            np.max(hull_values),
+        )
+        print("\n=== TEST SUMMARY over", num_runs, "runs ===")
+        print(
+            f"Nearest Neighbor Distance: avg={nn_mean:.2f}, "
+            f"min={nn_min:.2f}, max={nn_max:.2f}"
+        )
+        print(
+            f"Convex Hull Area: avg={hull_mean:.2f}, "
+            f"min={hull_min:.2f}, max={hull_max:.2f}"
+        )
+        print("=======================================")
+        return nn_mean, nn_min, nn_max, hull_mean, hull_min, hull_max
+
+    if swarm_mode == 2:
+        alignments, cohesions, collisions, hull_values = [], [], [], []
+        for i in range(num_runs):
+            alignment, avg_nn, coll, hull_area = run_headless_once(
+                runtime, swarm_mode, seed=i, interval=interval
+            )
+            alignments.append(alignment)
+            cohesions.append(avg_nn)
+            collisions.append(coll)
+            hull_values.append(hull_area)
+
+        align_mean, align_min, align_max = (
+            np.mean(alignments),
+            np.min(alignments),
+            np.max(alignments),
+        )
+        coh_mean, coh_min, coh_max = (
+            np.mean(cohesions),
+            np.min(cohesions),
+            np.max(cohesions),
+        )
+        hull_mean, hull_min, hull_max = (
+            np.mean(hull_values),
+            np.min(hull_values),
+            np.max(hull_values),
+        )
+        coll_mean, coll_min, coll_max = (
+            np.mean(collisions),
+            np.min(collisions),
+            np.max(collisions),
         )
 
-    # final metrics
-    avg_nn = compute_avg_nearest_neighbor(robots)
-    positions = np.array([r._pos for r in robots])
-    hull_area = 0.0
-    if len(positions) >= 3:
-        hull_area = float(ConvexHull(positions).volume)
-
-    return avg_nn, hull_area
-
-
-def test(num_runs=5, runtime=120.0, swarm_mode=1):
-    """Run multiple headless experiments and print summary statistics."""
-    nn_values = []
-    hull_values = []
-
-    for i in range(num_runs):
-        avg_nn, hull_area = run_headless_once(runtime, swarm_mode, seed=i)
-        nn_values.append(avg_nn)
-        hull_values.append(hull_area)
-
-    print("\n=== TEST SUMMARY over", num_runs, "runs ===")
-    print(
-        f"Nearest Neighbor Distance: avg={np.mean(nn_values):.2f}, "
-        f"min={np.min(nn_values):.2f}, max={np.max(nn_values):.2f}"
-    )
-    print(
-        f"Convex Hull Area: avg={np.mean(hull_values):.2f}, "
-        f"min={np.min(hull_values):.2f}, max={np.max(hull_values):.2f}"
-    )
-    print("=======================================")
+        print("\n=== FLOCKING TEST SUMMARY over", num_runs, "runs ===")
+        print(
+            f"Heading Alignment (0-1): avg={align_mean:.2f}, min={align_min:.2f}, max={align_max:.2f}"
+        )
+        print(
+            f"Neighbor Distance (Cohesion): avg={coh_mean:.2f}, min={coh_min:.2f}, max={coh_max:.2f}"
+        )
+        print(
+            f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
+        )
+        print(f"Collisions: avg={coll_mean:.1f}, min={coll_min}, max={coll_max}")
+        print("=======================================")
+        return (
+            align_mean,
+            align_min,
+            align_max,
+            coh_mean,
+            coh_min,
+            coh_max,
+            hull_mean,
+            hull_min,
+            hull_max,
+            coll_mean,
+            coll_min,
+            coll_max,
+        )
 
 
 def main():
@@ -674,6 +790,7 @@ def main():
     last_metric_time = 0.0  # used for nearest neighbour clock
     swarm_mode = 1
     show_visual_lines = True
+    metric_interval = 1.0
 
     while running:
         for event in pygame.event.get():
@@ -697,6 +814,9 @@ def main():
                     swarm_mode = 2
                 elif event.key == pygame.K_3:
                     swarm_mode = 3
+                elif event.key == pygame.K_q:
+                    pygame.quit()
+                    sys.exit()
                 elif event.key == pygame.K_v:
                     show_visual_lines = not show_visual_lines
                 elif event.key == pygame.K_r:
@@ -729,10 +849,15 @@ def main():
 
             frame_count += 1
 
-        # Every 5 seconds: pause, compute metric, resume
-        last_metric_time = snapshot_metrics(
-            robots, total_time, last_metric_time, interval=5.0
-        )
+        # Every 'interval' seconds: pause, compute metric, resume
+        if swarm_mode == 1:
+            last_metric_time = snapshot_dispersion_metrics(
+                robots, total_time, last_metric_time, interval=metric_interval
+            )
+        elif swarm_mode == 2:
+            last_metric_time = snapshot_flocking_metrics(
+                robots, total_time, last_metric_time, interval=metric_interval
+            )
 
         if visualize:
             clock.tick(60 if not paused else 10)
@@ -755,11 +880,78 @@ def main():
     logging_close()
 
 
+def print_dispersion_summary(nn_stats, hull_stats):
+    nn_mean, nn_min, nn_max = nn_stats
+    hull_mean, hull_min, hull_max = hull_stats
+
+    print("Dispersion Test Summary:")
+    print(
+        f"Nearest Neighbor Distance: avg={nn_mean:.2f}, min={nn_min:.2f}, max={nn_max:.2f}"
+    )
+    print(
+        f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
+    )
+    print("=======================================")
+
+
+def print_flocking_summary(align_stats, coh_stats, hull_stats, coll_stats):
+    align_mean, align_min, align_max = align_stats
+    coh_mean, coh_min, coh_max = coh_stats
+    hull_mean, hull_min, hull_max = hull_stats
+    coll_mean, coll_min, coll_max = coll_stats
+
+    print("Flocking Test Summary:")
+    print(
+        f"Heading Alignment: avg={align_mean:.2f}, min={align_min:.2f}, max={align_max:.2f}"
+    )
+    print(
+        f"Neighbor Distance (Cohesion): avg={coh_mean:.2f}, min={coh_min:.2f}, max={coh_max:.2f}"
+    )
+    print(
+        f"Convex Hull Area: avg={hull_mean:.2f}, min={hull_min:.2f}, max={hull_max:.2f}"
+    )
+    print(f"Collisions: avg={coll_mean:.1f}, min={coll_min}, max={coll_max}")
+    print("=======================================")
+
+
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         print("Swarm mode: Dispersion\n")
-        test(swarm_mode=1)  # run headless test
+        (nn_mean, nn_min, nn_max, hull_mean, hull_min, hull_max) = test(
+            num_runs=1, swarm_mode=1, interval=1.0
+        )
+
+        print("\nSwarm mode: Flocking\n")
+        (
+            align_mean,
+            align_min,
+            align_max,
+            coh_mean,
+            coh_min,
+            coh_max,
+            hull_mean,
+            hull_min,
+            hull_max,
+            coll_mean,
+            coll_min,
+            coll_max,
+        ) = test(num_runs=1, swarm_mode=2, interval=1.0)
+
+        print("\n=======================================")
+        print("\n============== Summaries ==============")
+        print("\n=======================================")
+
+        print_dispersion_summary(
+            (nn_mean, nn_min, nn_max), (hull_mean, hull_min, hull_max)
+        )
+
+        print_flocking_summary(
+            (align_mean, align_min, align_max),
+            (coh_mean, coh_min, coh_max),
+            (hull_mean, hull_min, hull_max),
+            (coll_mean, coll_min, coll_max),
+        )
     else:
-        main()  # run interactive simulator
+        main()  # run interactive
