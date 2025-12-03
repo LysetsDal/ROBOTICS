@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pygame
 import numpy as np
 import sys
@@ -572,6 +575,66 @@ def compute_num_flocks(robots, eps=None, min_samples=1):
     return num_flocks
 
 
+def compute_alignment_metric(robots):
+    """Return normalized heading alignment (0-1)."""
+    if not robots:
+        return 0.0
+    headings = np.array([r._heading for r in robots])
+    heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
+    mean_vec = np.mean(heading_vecs, axis=0)
+    return float(np.linalg.norm(mean_vec))
+
+
+def collect_time_series(
+    swarm_mode,
+    runtime=120.0,
+    sample_interval=1.0,
+    seed=None,
+):
+    """Collect time-series metrics for dispersion or flocking simulations."""
+    if sample_interval <= 0:
+        raise ValueError("sample_interval must be positive")
+
+    dt = SIM_DT
+    robots = init_robots(seed=seed)
+
+    total_time = 0.0
+    next_sample = 0.0
+
+    series = {"time": [], "avg_nn": [], "hull_area": []}
+    if swarm_mode == 2:
+        series["alignment"] = []
+        series["num_flocks"] = []
+
+    while total_time < runtime:
+        total_time += dt
+
+        for r in robots:
+            r.read_sensors(robots, OBSTACLES, ARENA_BOUNDS)
+        for r in robots:
+            r.robot_controller(swarm_mode)
+        for r in robots:
+            r.move(dt)
+
+        while next_sample <= runtime + 1e-9 and total_time >= next_sample - 1e-9:
+            avg_nn = compute_avg_nearest_neighbor(robots)
+            hull_area = compute_convex_hull_area(robots)
+
+            series["time"].append(next_sample)
+            series["avg_nn"].append(float(avg_nn))
+            series["hull_area"].append(float(hull_area))
+
+            if swarm_mode == 2:
+                alignment = compute_alignment_metric(robots)
+                num_flocks = compute_num_flocks(robots)
+                series["alignment"].append(float(alignment))
+                series["num_flocks"].append(int(num_flocks))
+
+            next_sample += sample_interval
+
+    return series
+
+
 def init_robots(seed=42):
     np.random.seed(seed)
     robots = []
@@ -599,10 +662,7 @@ def snapshot_dispersion_metrics(robots, total_time, last_metric_time, interval=5
 def snapshot_flocking_metrics(robots, total_time, last_metric_time, interval=5.0):
     """Print flocking metrics at intervals (alignment + cohesion + collisions + flock count)."""
     if total_time - last_metric_time >= interval:
-        headings = np.array([r._heading for r in robots])
-        heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
-        mean_vec = np.mean(heading_vecs, axis=0)
-        alignment = np.linalg.norm(mean_vec)
+        alignment = compute_alignment_metric(robots)
         hull_area = compute_convex_hull_area(robots)
         avg_nn = compute_avg_nearest_neighbor(robots)
         num_flocks = compute_num_flocks(robots)
@@ -671,10 +731,7 @@ def run_headless_once(runtime=120.0, swarm_mode=1, seed=None, interval=5.0):
         return avg_nn, hull_area
 
     elif swarm_mode == 2:
-        headings = np.array([r._heading for r in robots])
-        heading_vecs = np.column_stack((np.cos(headings), np.sin(headings)))
-        mean_vec = np.mean(heading_vecs, axis=0)
-        alignment = np.linalg.norm(mean_vec)
+        alignment = compute_alignment_metric(robots)
         avg_nn = compute_avg_nearest_neighbor(robots)
         hull_area = compute_convex_hull_area(robots)
         return alignment, avg_nn, hull_area, list_num_flocks
@@ -888,9 +945,18 @@ def main():
             draw_obstacles(screen)
             for robot in robots:
                 robot.draw(screen, show_visual_lines)
+            # overlay current swarm mode to aid debugging
+            if swarm_mode == 1:
+                mode_label = "MODE: DISPERSION"
+            elif swarm_mode == 2:
+                mode_label = "MODE: FLOCKING"
+            else:
+                mode_label = "MODE: STOPPED"
+            mode_txt = font.render(mode_label, True, (255, 255, 255))
+            screen.blit(mode_txt, (10, 10))
             if paused:
                 txt = font.render("PAUSED", True, (255, 100, 100))
-                screen.blit(txt, (10, 10))
+                screen.blit(txt, (10, 30))
             pygame.display.flip()
             pygame.display.set_caption("Robot Sim — VISUAL MODE")
         else:
@@ -938,15 +1004,28 @@ def print_flocking_summary(align_stats, coh_stats, hull_stats, flock_stats):
     print("=======================================")
 
 
-if __name__ == "__main__":
-    import sys
+def run_test_cli(args):
+    scenario = args.scenario
+    interval = args.interval
+    runs = args.runs
 
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        # print("Swarm mode: Dispersion\n")
-        # (nn_mean, nn_min, nn_max, hull_mean, hull_min, hull_max) = test(
-        #     num_runs=1, swarm_mode=1, interval=1.0
-        # )
+    if scenario == "dispersion":
+        print("\nSwarm mode: Dispersion\n")
+        (
+            nn_mean,
+            nn_min,
+            nn_max,
+            hull_mean,
+            hull_min,
+            hull_max,
+        ) = test(num_runs=runs, swarm_mode=1, interval=interval)
 
+        print("\n============== Summaries ==============\n")
+        print_dispersion_summary(
+            (nn_mean, nn_min, nn_max), (hull_mean, hull_min, hull_max)
+        )
+
+    else:
         print("\nSwarm mode: Flocking\n")
         (
             align_mean,
@@ -961,19 +1040,111 @@ if __name__ == "__main__":
             flock_mean,
             flock_min,
             flock_max,
-        ) = test(num_runs=1, swarm_mode=2, interval=1.0)
+        ) = test(num_runs=runs, swarm_mode=2, interval=interval)
 
-        print("\n============== Summaries ==============")
-
-        # print_dispersion_summary(
-        #     (nn_mean, nn_min, nn_max), (hull_mean, hull_min, hull_max)
-        # )
-
+        print("\n============== Summaries ==============\n")
         print_flocking_summary(
             (align_mean, align_min, align_max),
             (coh_mean, coh_min, coh_max),
             (hull_mean, hull_min, hull_max),
             (flock_mean, flock_min, flock_max),
         )
+
+
+def run_collect_cli(args):
+    scenario = args.scenario
+    swarm_mode = 1 if scenario == "dispersion" else 2
+    base_seed = None if args.seed is None or args.seed < 0 else args.seed
+    output_path = Path(args.output).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    runs_payload = []
+    for i in range(args.runs):
+        run_seed = base_seed + i if base_seed is not None else None
+        series = collect_time_series(
+            swarm_mode=swarm_mode,
+            runtime=args.runtime,
+            sample_interval=args.sample_interval,
+            seed=run_seed,
+        )
+        run_entry = {"seed": run_seed, **series}
+        runs_payload.append(run_entry)
+
+    payload = {
+        "scenario": scenario,
+        "swarm_mode": swarm_mode,
+        "runtime": args.runtime,
+        "sample_interval": args.sample_interval,
+        "num_runs": args.runs,
+        "runs": runs_payload,
+    }
+
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    print(f"Saved time-series metrics to {output_path}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    if len(sys.argv) == 1:
+        main()
     else:
-        main()  # run interactive
+        parser = argparse.ArgumentParser(
+            description="Swarm robotics simulator CLI"
+        )
+        subparsers = parser.add_subparsers(dest="command", required=True)
+
+        test_parser = subparsers.add_parser(
+            "test", help="Run aggregated headless tests"
+        )
+        test_parser.add_argument(
+            "scenario", choices=["dispersion", "flocking"], help="Swarm behavior"
+        )
+        test_parser.add_argument(
+            "--runs", type=int, default=1, help="Number of runs to average"
+        )
+        test_parser.add_argument(
+            "--interval",
+            type=float,
+            default=1.0,
+            help="Metric snapshot interval (s)",
+        )
+
+        collect_parser = subparsers.add_parser(
+            "collect", help="Collect time-series metrics for plotting"
+        )
+        collect_parser.add_argument(
+            "scenario", choices=["dispersion", "flocking"], help="Swarm behavior"
+        )
+        collect_parser.add_argument(
+            "--runtime", type=float, default=120.0, help="Simulation runtime (s)"
+        )
+        collect_parser.add_argument(
+            "--sample-interval",
+            type=float,
+            default=1.0,
+            help="Sampling interval for metrics (s)",
+        )
+        collect_parser.add_argument(
+            "--runs", type=int, default=1, help="Number of runs to simulate"
+        )
+        collect_parser.add_argument(
+            "--seed",
+            type=int,
+            default=42,
+            help="Base RNG seed (use negative value for random seeds)",
+        )
+        collect_parser.add_argument(
+            "--output",
+            required=True,
+            help="Path to JSON file where metrics will be saved",
+        )
+
+        args = parser.parse_args()
+
+        if args.command == "test":
+            run_test_cli(args)
+        elif args.command == "collect":
+            run_collect_cli(args)
