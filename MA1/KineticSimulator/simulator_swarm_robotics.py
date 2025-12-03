@@ -877,7 +877,7 @@ def main():
                 robots, total_time, last_metric_time, interval=metric_interval
             )
         elif swarm_mode == 2:
-            last_metric_time = snapshot_flocking_metrics(
+            last_metric_time, _ = snapshot_flocking_metrics(
                 robots, total_time, last_metric_time, interval=metric_interval
             )
 
